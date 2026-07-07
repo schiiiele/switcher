@@ -1,0 +1,7 @@
+config.json
+schedules.json
+*.log
+*.bak-*
+__pycache__/
+*.pyc
+.DS_Store
