@@ -355,6 +355,8 @@ HTML = r"""<!DOCTYPE html>
   .chip-on{ background:#eafaf0; color:#1a8f52; }
   .chip-off{ background:#f0f1f4; color:var(--faint); }
   .del{ background:#fff0f0; border:none; color:var(--rose); border-radius:999px; padding:7px 12px; font-size:12px; font-weight:700; cursor:pointer; }
+  .cancel-edit{ width:100%; margin-top:8px; padding:12px 0; border-radius:15px; border:none; background:#f0f1f4; color:var(--faint); font-size:13.5px; font-weight:700; cursor:pointer; }
+  .sch>div:first-child:active{ opacity:.55; }
 
   /* 배터리 버튼 */
   .batbtn{ display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:700; color:var(--dim);
@@ -472,7 +474,7 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- 예약 -->
-<div class="sec">
+<div class="sec" id="sec-daily">
   <div class="sec-h"><h2>예약</h2></div>
   <div class="float pad">
     <div class="tabs">
@@ -513,7 +515,8 @@ HTML = r"""<!DOCTYPE html>
         <button id="seg-off" class="off-active" onclick="setAction('off')">끄기</button>
       </div>
     </div>
-    <button class="add" onclick="addDaily()">예약 추가</button>
+    <button class="add" id="daily-save-btn" onclick="addDaily()">예약 추가</button>
+    <button class="cancel-edit" id="daily-cancel-btn" style="display:none" onclick="cancelEditDaily()">취소</button>
   </div>
 </div>
 
@@ -524,7 +527,7 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- 타이머 -->
-<div class="sec">
+<div class="sec" id="sec-timer">
   <div class="sec-h"><h2>타이머</h2></div>
   <div class="float pad">
     <div class="tpresets">
@@ -540,7 +543,8 @@ HTML = r"""<!DOCTYPE html>
         <button id="tseg-off" class="off-active" onclick="setTimerAction('off')">끄기</button>
       </div>
     </div>
-    <button class="add" onclick="addTimer()">타이머 추가</button>
+    <button class="add" id="timer-save-btn" onclick="addTimer()">타이머 추가</button>
+    <button class="cancel-edit" id="timer-cancel-btn" style="display:none" onclick="cancelEditTimer()">취소</button>
   </div>
 </div>
 
@@ -548,6 +552,7 @@ HTML = r"""<!DOCTYPE html>
 
 <script>
 let selectedDays=[], selectedAction='off', timerAction='off', scanned=[], selectedIdx=-1, deviceType=1, busy=false;
+let latestSchedules=[], editingDailyId=null, editingTimerId=null;
 const DAY=['월','화','수','목','금','토','일'];
 
 function toast(msg, kind){
@@ -698,19 +703,64 @@ async function addDaily(){
   const t=document.getElementById('daily-time').value;
   if(!t){ toast('시간을 입력하세요','bad'); return; }
   const [h,m]=t.split(':').map(Number);
-  await fetch('/schedule/daily',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({hour:h,minute:m,action:selectedAction,days:selectedDays})});
+  const body=JSON.stringify({hour:h,minute:m,action:selectedAction,days:selectedDays});
   const ds=selectedDays.slice().sort().map(i=>DAY[i]).join('');
-  toast('['+ds+'] '+t+' '+(selectedAction==='on'?'켜기':'끄기')+' 예약','good');
+  if(editingDailyId){
+    await fetch('/schedule/'+editingDailyId,{method:'PATCH',headers:{'Content-Type':'application/json'},body});
+    toast('['+ds+'] '+t+' '+(selectedAction==='on'?'켜기':'끄기')+'로 수정','good');
+    cancelEditDaily();
+  } else {
+    await fetch('/schedule/daily',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    toast('['+ds+'] '+t+' '+(selectedAction==='on'?'켜기':'끄기')+' 예약','good');
+  }
   loadSchedules();
 }
 async function addTimer(){
   const min=parseInt(document.getElementById('timer-min').value);
   if(!min||min<1){ toast('분을 입력하세요','bad'); return; }
-  await fetch('/schedule/timer',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({minutes:min,action:timerAction})});
-  toast(min+'분 후 '+(timerAction==='on'?'켜기':'끄기')+' 예약','good');
+  const body=JSON.stringify({minutes:min,action:timerAction});
+  if(editingTimerId){
+    await fetch('/schedule/'+editingTimerId,{method:'PATCH',headers:{'Content-Type':'application/json'},body});
+    toast(min+'분 후 '+(timerAction==='on'?'켜기':'끄기')+'로 수정','good');
+    cancelEditTimer();
+  } else {
+    await fetch('/schedule/timer',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    toast(min+'분 후 '+(timerAction==='on'?'켜기':'끄기')+' 예약','good');
+  }
   loadSchedules();
+}
+function editSchedule(id){
+  const s=latestSchedules.find(x=>x.id===id);
+  if(!s) return;
+  if(s.type==='daily'){
+    switchTab('weekday', document.querySelector('.tab'));
+    selectedDays=s.days.slice();
+    document.querySelectorAll('#tab-weekday .day').forEach((el,i)=>el.classList.toggle('on',selectedDays.includes(i)));
+    document.getElementById('daily-time').value=String(s.hour).padStart(2,'0')+':'+String(s.minute).padStart(2,'0');
+    setAction(s.action);
+    editingDailyId=id;
+    document.getElementById('daily-save-btn').textContent='수정 저장';
+    document.getElementById('daily-cancel-btn').style.display='';
+    document.getElementById('sec-daily').scrollIntoView({behavior:'smooth',block:'start'});
+  } else {
+    const remainMin=Math.max(1,Math.round((s.trigger_at-Date.now()/1000)/60));
+    document.getElementById('timer-min').value=remainMin;
+    setTimerAction(s.action);
+    editingTimerId=id;
+    document.getElementById('timer-save-btn').textContent='수정 저장';
+    document.getElementById('timer-cancel-btn').style.display='';
+    document.getElementById('sec-timer').scrollIntoView({behavior:'smooth',block:'start'});
+  }
+}
+function cancelEditDaily(){
+  editingDailyId=null;
+  document.getElementById('daily-save-btn').textContent='예약 추가';
+  document.getElementById('daily-cancel-btn').style.display='none';
+}
+function cancelEditTimer(){
+  editingTimerId=null;
+  document.getElementById('timer-save-btn').textContent='타이머 추가';
+  document.getElementById('timer-cancel-btn').style.display='none';
 }
 async function toggleSchedule(id,btn){
   const d=await (await fetch('/schedule/'+id+'/toggle',{method:'POST'})).json();
@@ -720,6 +770,7 @@ async function deleteSchedule(id){ await fetch('/schedule/'+id,{method:'DELETE'}
 
 async function loadSchedules(){
   const d=await (await fetch('/schedules')).json();
+  latestSchedules=d;
   const el=document.getElementById('sch-list');
   if(!d.length){ el.innerHTML='<div class="empty">아직 예약이 없어요</div>'; return; }
   el.innerHTML=d.map(s=>{
@@ -730,7 +781,7 @@ async function loadSchedules(){
     } else { desc=s.label; sub=(s.action==='on'?'켜기':'끄기'); }
     const on=s.enabled!==false;
     return `<div class="sch">
-      <div><div class="d">${desc}</div><div class="s">${sub}</div></div>
+      <div style="cursor:pointer" onclick="editSchedule(${s.id})"><div class="d">${desc}</div><div class="s">${sub}</div></div>
       <div style="display:flex;gap:7px;align-items:center">
         <button class="chip ${on?'chip-on':'chip-off'}" onclick="toggleSchedule(${s.id},this)">${on?'작동중':'중단됨'}</button>
         <button class="del" onclick="deleteSchedule(${s.id})">삭제</button>
@@ -846,6 +897,28 @@ def delete_schedule(sid):
     schedules[:] = [s for s in schedules if s["id"] != sid]
     save_schedules()
     return jsonify({"ok": True})
+
+@app.route("/schedule/<int:sid>", methods=["PATCH"])
+def update_schedule(sid):
+    data = request.json
+    for s in schedules:
+        if s["id"] != sid:
+            continue
+        if s["type"] == "daily":
+            s["action"] = data.get("action", s["action"])
+            s["hour"] = int(data.get("hour", s["hour"]))
+            s["minute"] = int(data.get("minute", s["minute"]))
+            s["days"] = data.get("days", s["days"])
+        elif s["type"] == "timer":
+            minutes = int(data.get("minutes", 30))
+            s["action"] = data.get("action", s["action"])
+            trigger_at = time.time() + minutes * 60
+            trigger_dt = datetime.fromtimestamp(trigger_at)
+            s["trigger_at"] = trigger_at
+            s["label"] = f"{minutes}분 후 ({trigger_dt.strftime('%H:%M')} 실행)"
+        save_schedules()
+        return jsonify({"ok": True, "schedule": s})
+    return jsonify({"ok": False, "error": "not found"}), 404
 
 @app.route("/schedule/<int:sid>/toggle", methods=["POST"])
 def toggle_schedule(sid):
