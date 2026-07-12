@@ -28,6 +28,15 @@ OFF_KEY2     = binascii.a2b_hex("03")  # 2구 OFF
 PORT = 5001
 
 # ── Config 로드/저장 ─────────────────────────────
+def _atomic_save_json(path, data, indent=None):
+    """쓰다가 죽어도 원본이 깨지지 않게 임시파일에 쓰고 교체."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {"device_address": None, "device_name": None, "device_type": 1}
@@ -35,8 +44,7 @@ def load_config():
         return json.load(f)
 
 def save_config(data):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _atomic_save_json(CONFIG_FILE, data, indent=2)
 
 config = load_config()
 
@@ -47,8 +55,7 @@ schedule_id_counter = 1
 
 # ── 예약 저장/불러오기 ──────────────────────────
 def save_schedules():
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"counter": schedule_id_counter, "schedules": schedules}, f, ensure_ascii=False)
+    _atomic_save_json(SCHEDULE_FILE, {"counter": schedule_id_counter, "schedules": schedules})
 
 def load_schedules():
     global schedules, schedule_id_counter
@@ -76,24 +83,29 @@ def _run_ble(coro):
             loop.close()
 
 # ── BLE 명령 ────────────────────────────────────
-async def _send_command(key, attempts=3):
+async def _with_device(op, attempts=3):
+    """저장된 기기에 연결해 op(client)를 실행. 실패 시 재시도.
+
+    광고 주기가 느려 연결 순간 신호를 놓치면 BleakDeviceNotFoundError로
+    바로 실패하므로, 잠깐 쉬었다 재시도하면 대부분 잡힌다.
+    """
     addr = config.get("device_address")
     if not addr:
         raise RuntimeError("장치가 설정되지 않았습니다.")
-    # 광고 주기가 느려 연결 순간 신호를 놓치면 BleakDeviceNotFoundError로
-    # 바로 실패하므로, 잠깐 쉬었다 재시도하면 대부분 잡힌다.
     last_err = None
     for i in range(attempts):
         try:
             async with BleakClient(addr, timeout=15) as client:
-                await client.write_gatt_char(CHAR_UUID, key)
-                return
+                return await op(client)
         except Exception as e:
             last_err = e
-            print(f"[BLE 전송 실패 {i + 1}/{attempts}회차] {e}")
+            print(f"[BLE 실패 {i + 1}/{attempts}회차] {e}")
             if i < attempts - 1:
                 await asyncio.sleep(2)
     raise last_err
+
+async def _send_command(key):
+    await _with_device(lambda client: client.write_gatt_char(CHAR_UUID, key))
 
 def run_command(action):
     device_type = config.get("device_type", 1)
@@ -105,12 +117,10 @@ def run_command(action):
 
 # ── 배터리 조회 ─────────────────────────────────
 async def _read_battery():
-    addr = config.get("device_address")
-    if not addr:
-        raise RuntimeError("장치가 설정되지 않았습니다.")
-    async with BleakClient(addr) as client:
+    async def op(client):
         val = await client.read_gatt_char(BATTERY_UUID)
         return val[0]
+    return await _with_device(op)
 
 def get_battery_level():
     return _run_ble(_read_battery())
@@ -581,6 +591,8 @@ let selectedDays=[], selectedAction='off', timerAction='off', scanned=[], select
 let latestSchedules=[], editingDailyId=null, editingTimerId=null;
 const DAY=['월','화','수','목','금','토','일'];
 
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
 function toast(msg, kind){
   const t=document.getElementById('toast');
   t.textContent=msg;
@@ -639,7 +651,7 @@ async function startScan(){
     note.textContent=scanned.length+'개 발견';
     list.innerHTML=scanned.map((v,i)=>`
       <div class="dev" onclick="selectDevice(${i})" id="dev-${i}">
-        <div><div class="nm">${v.name}</div><div class="ad">${v.address}</div></div>
+        <div><div class="nm">${esc(v.name)}</div><div class="ad">${esc(v.address)}</div></div>
         <div class="rs">${v.rssi!=null?v.rssi+' dBm':''}</div>
       </div>`).join('');
   }catch(e){ note.textContent='에러: '+e.message; }
@@ -834,10 +846,16 @@ def get_config():
 
 @app.route("/config", methods=["POST"])
 def set_config():
-    data = request.json
+    data = request.json or {}
+    try:
+        device_type = int(data.get("device_type", 1))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "device_type이 잘못됐습니다."}), 400
+    if device_type not in (1, 2):
+        return jsonify({"ok": False, "error": "device_type은 1 또는 2여야 합니다."}), 400
     config["device_address"] = data.get("address")
     config["device_name"] = data.get("name")
-    config["device_type"] = int(data.get("device_type", 1))
+    config["device_type"] = device_type
     save_config(config)
     return jsonify({"ok": True})
 
@@ -851,6 +869,8 @@ def scan():
 
 @app.route("/switch/<action>", methods=["POST"])
 def switch(action):
+    if action not in ("on", "off"):
+        return jsonify({"ok": False, "error": "action은 on/off만 가능합니다."}), 400
     try:
         run_command(action)
         return jsonify({"ok": True})
@@ -880,12 +900,45 @@ def ble_forget():
     save_config(config)
     return jsonify({"ok": True})
 
+def _validate_daily(data, defaults):
+    """매일 예약 필드 검증. (필드dict, None) 또는 (None, 오류문구)."""
+    try:
+        hour = int(data.get("hour", defaults["hour"]))
+        minute = int(data.get("minute", defaults["minute"]))
+    except (TypeError, ValueError):
+        return None, "시간 값이 잘못됐습니다."
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None, "시간 범위를 벗어났습니다."
+    action = data.get("action", defaults["action"])
+    if action not in ("on", "off"):
+        return None, "action은 on/off만 가능합니다."
+    days = data.get("days", defaults["days"])
+    if not (isinstance(days, list) and days
+            and all(isinstance(d, int) and 0 <= d <= 6 for d in days)):
+        return None, "days가 잘못됐습니다."
+    return {"hour": hour, "minute": minute, "action": action, "days": days}, None
+
+def _validate_timer(data, default_action="off"):
+    """타이머 필드 검증. ((minutes, action), None) 또는 (None, 오류문구)."""
+    try:
+        minutes = int(data.get("minutes", 30))
+    except (TypeError, ValueError):
+        return None, "minutes가 잘못됐습니다."
+    if minutes < 1:
+        return None, "minutes는 1 이상이어야 합니다."
+    action = data.get("action", default_action)
+    if action not in ("on", "off"):
+        return None, "action은 on/off만 가능합니다."
+    return (minutes, action), None
+
 @app.route("/schedule/timer", methods=["POST"])
 def add_timer():
     global schedule_id_counter
-    data = request.json
-    minutes = int(data.get("minutes", 30))
-    action = data.get("action", "off")
+    data = request.json or {}
+    parsed, err = _validate_timer(data)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    minutes, action = parsed
     trigger_at = time.time() + minutes * 60
     trigger_dt = datetime.fromtimestamp(trigger_at)
     s = {
@@ -903,16 +956,12 @@ def add_timer():
 @app.route("/schedule/daily", methods=["POST"])
 def add_daily():
     global schedule_id_counter
-    data = request.json
-    s = {
-        "id": schedule_id_counter,
-        "type": "daily",
-        "enabled": True,
-        "action": data.get("action", "off"),
-        "hour": int(data.get("hour", 23)),
-        "minute": int(data.get("minute", 0)),
-        "days": data.get("days", list(range(7))),
-    }
+    data = request.json or {}
+    fields, err = _validate_daily(data, {"hour": 23, "minute": 0,
+                                         "action": "off", "days": list(range(7))})
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    s = {"id": schedule_id_counter, "type": "daily", "enabled": True, **fields}
     schedule_id_counter += 1
     schedules.append(s)
     save_schedules()
@@ -926,20 +975,23 @@ def delete_schedule(sid):
 
 @app.route("/schedule/<int:sid>", methods=["PATCH"])
 def update_schedule(sid):
-    data = request.json
+    data = request.json or {}
     for s in schedules:
         if s["id"] != sid:
             continue
         if s["type"] == "daily":
-            s["action"] = data.get("action", s["action"])
-            s["hour"] = int(data.get("hour", s["hour"]))
-            s["minute"] = int(data.get("minute", s["minute"]))
-            s["days"] = data.get("days", s["days"])
+            fields, err = _validate_daily(data, s)
+            if err:
+                return jsonify({"ok": False, "error": err}), 400
+            s.update(fields)
         elif s["type"] == "timer":
-            minutes = int(data.get("minutes", 30))
-            s["action"] = data.get("action", s["action"])
+            parsed, err = _validate_timer(data, default_action=s["action"])
+            if err:
+                return jsonify({"ok": False, "error": err}), 400
+            minutes, action = parsed
             trigger_at = time.time() + minutes * 60
             trigger_dt = datetime.fromtimestamp(trigger_at)
+            s["action"] = action
             s["trigger_at"] = trigger_at
             s["label"] = f"{minutes}분 후 ({trigger_dt.strftime('%H:%M')} 실행)"
         save_schedules()
