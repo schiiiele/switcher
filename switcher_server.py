@@ -203,7 +203,18 @@ def register_mdns(port=PORT):
     try:
         from zeroconf import ServiceInfo, Zeroconf
         import socket
-        local_ip = socket.gethostbyname(socket.gethostname())
+        # gethostbyname(gethostname())은 macOS에서 127.0.0.1을 주는 경우가 많아
+        # 폰이 switcher.local→자기 자신으로 접속하게 됨. UDP 소켓 트릭으로
+        # 실제 LAN 인터페이스 IP를 얻는다(패킷은 실제로 안 나감).
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            local_ip = _s.getsockname()[0]
+            _s.close()
+        except OSError:
+            local_ip = socket.gethostbyname(socket.gethostname())
+        if local_ip.startswith("127."):
+            raise RuntimeError(f"LAN IP를 못 찾음(감지값 {local_ip}) — mDNS 등록 건너뜀")
         info = ServiceInfo(
             "_http._tcp.local.",
             "switcher._http._tcp.local.",
