@@ -76,12 +76,24 @@ def _run_ble(coro):
             loop.close()
 
 # ── BLE 명령 ────────────────────────────────────
-async def _send_command(key):
+async def _send_command(key, attempts=3):
     addr = config.get("device_address")
     if not addr:
         raise RuntimeError("장치가 설정되지 않았습니다.")
-    async with BleakClient(addr) as client:
-        await client.write_gatt_char(CHAR_UUID, key)
+    # 광고 주기가 느려 연결 순간 신호를 놓치면 BleakDeviceNotFoundError로
+    # 바로 실패하므로, 잠깐 쉬었다 재시도하면 대부분 잡힌다.
+    last_err = None
+    for i in range(attempts):
+        try:
+            async with BleakClient(addr, timeout=15) as client:
+                await client.write_gatt_char(CHAR_UUID, key)
+                return
+        except Exception as e:
+            last_err = e
+            print(f"[BLE 전송 실패 {i + 1}/{attempts}회차] {e}")
+            if i < attempts - 1:
+                await asyncio.sleep(2)
+    raise last_err
 
 def run_command(action):
     device_type = config.get("device_type", 1)
