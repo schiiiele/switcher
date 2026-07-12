@@ -175,7 +175,10 @@ def scheduler_loop():
     while True:
         now = datetime.now()
         weekday = now.weekday()
-        minute_key_base = (now.hour, now.minute)
+        # 날짜까지 키에 포함해야 "같은 1분 내 중복 방지"가 된다.
+        # (시·분만 쓰면 다음 날 같은 시각이 영원히 스킵됨)
+        minute_key_base = (now.date(), now.hour, now.minute)
+        fired_daily = {k for k in fired_daily if k[1] == minute_key_base}
         to_remove = []
         for s in schedules[:]:
             if not s.get("enabled", True):
