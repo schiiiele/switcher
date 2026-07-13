@@ -10,7 +10,8 @@ import subprocess
 import platform
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
-from flask import Flask, jsonify, request
+import base64
+from flask import Flask, jsonify, request, Response
 
 # ── 경로 설정 ────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -281,7 +282,8 @@ HTML = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="스위처">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.min.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%23131114'/%3E%3Ccircle cx='50' cy='46' r='20' fill='%23f5a524'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%23131114'/%3E%3Ccircle cx='50' cy='50' r='26' fill='none' stroke='%23f5a524' stroke-width='7'/%3E%3Cpath d='M50 24 A26 26 0 0 1 50 76 Z' fill='%23f5a524'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>스위처</title>
 <style>
   /* ── yde 토큰: 야간 도구 ── */
@@ -1084,6 +1086,18 @@ def toggle_schedule(sid):
 @app.route("/schedules")
 def get_schedules():
     return jsonify(schedules)
+
+# ── 앱 아이콘 (base64 내장: 파일 없이 단일파일·미러 배포 유지) ──
+# 로고 = 하프디스크(빛↔어둠 = 켜짐↔꺼짐), 앰버 #f5a524 on #131114
+_APPLE_ICON_180 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAIAAACyr5FlAAADRElEQVR42u3dsVErQRBF0aVLAUCBTYSEowgVASF847uUgAKhft3n2jjMHs2spNnRw/PTyyF9VBkCwSE4BIfgEByCQ3AIDsEhOCQ4BIfgEByCQ3AIDsEhOASHBIfgEByCQ3AIDsEhOASH4JDgEBz6fqe1//nl/PjFv3x9e985RA9Ljn36OgVctuD4XRPblMzEcWsTS5SMwvH3JmYrGYKjA4t5ROJxdGMxiUgwjs4sZhCJxJHCIp1IHo7fkvHh1bopuzgfpz0y7n5tLufHLB+n8SxaXY///0UKkdNUGZ0vQMoUUvNkvL699x/6iHvqmjSIESyCfNSYb9UT3ys291HpAxfKIsJHpcs4Dl8MbcKxSkZnH5U4TOlLSYqPSpRxHPatLcOxXEZDH0UGH/HPrax9PmA7jk9fK9tkNJk8igw+muIgo7MPz8qqJQ7TRvPJo7w9UTsc118TZHSYPNxzqBkO00bE5GHmUCccpo2UycPMoRAcpo3VOBKfgV67spRpQ+451BuHNSVrAMuaIsuKGuOwpsQNY1lTZFkRHIJDcGgBjiv32O5G275hMXMIDsEhOASH4BAcgkNwCA7BIcEhOJSD48pXr/aWtt1VaeYQHIJDcMjZ51qCw17RuGG0rGjEj/FoMg4rS9YAWlY05QcANRmHlSVo6Mo5vXLPoQQc16dHk0ef5djMoWY4TB4Rd/FmDvXDYfLo/+a/nF+jjjg+fU3wcd/PDN1zqCsOk0fnrxqq/xDs9NHhS6iMs8+3+Wjy9WQ5fFMTfoxniY8+uxrCfgBwvI9W+13yfld2sI9uO6EqcYAu58d5RBrukavcYZrko+fuyYoerBk+2u6rrfQhS19iOu+4rhkDF0qk+V78mjR8WUT6P6VR8wYxgkjE8zsPz08vx+iPz78795CRh+PnF6/DJ2xZD/yF4fjF6/fhdbopjrhHQfNwhH68kfiQcCSOLCK5z44H4+hPJP1IgXgcPYnMOGliCI4+RCYdQDIKxx2VjDyUZiYOn1vAcTclSw6v2oLjJ1zWnmO2F4cOz8oKDsEhOASH4BAcgkNwCA5DIDgEh+AQHIJDcAgOwSE4BIcEh+AQHIJDcAgOwSE4BIfgkOAQHIJDN+gfwn07cTEV0IkAAAAASUVORK5CYII="
+)
+
+@app.route("/apple-touch-icon.png")
+@app.route("/apple-touch-icon-precomposed.png")
+def apple_touch_icon():
+    return Response(_APPLE_ICON_180, mimetype="image/png")
+
 
 if __name__ == "__main__":
     import socket
