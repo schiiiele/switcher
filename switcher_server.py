@@ -212,33 +212,59 @@ def scheduler_loop():
         time.sleep(1)
 
 # ── mDNS 등록 (선택적) ───────────────────────────
+def _get_lan_ip():
+    """실제 LAN 인터페이스 IP. gethostbyname(gethostname())은 macOS에서 127.0.0.1을
+    주는 경우가 많아, UDP 소켓 트릭으로 나가는 인터페이스 주소를 얻는다(패킷은 안 나감)."""
+    import socket
+    try:
+        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _s.connect(("8.8.8.8", 80))
+        ip = _s.getsockname()[0]
+        _s.close()
+        return ip
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+
+
+def _mdns_info(local_ip, port):
+    from zeroconf import ServiceInfo
+    import socket
+    return ServiceInfo(
+        "_http._tcp.local.",
+        "switcher._http._tcp.local.",
+        addresses=[socket.inet_aton(local_ip)],
+        port=port,
+        properties={"path": "/"},
+        server="switcher.local.",
+    )
+
+
+def _mdns_watch(zc, port, current_ip, interval=20):
+    """Wi-Fi 재접속·DHCP 갱신 등으로 맥 IP가 바뀌면 switcher.local을 새 IP로 재등록.
+    (예전엔 IP 바뀔 때마다 폰에서 접속이 끊겨 수동 재시작해야 했음)"""
+    while True:
+        time.sleep(interval)
+        try:
+            ip = _get_lan_ip()
+            if ip and not ip.startswith("127.") and ip != current_ip:
+                zc.update_service(_mdns_info(ip, port))
+                print(f"🔄 IP 변경 감지 {current_ip} → {ip} · switcher.local 재등록")
+                current_ip = ip
+        except Exception as e:
+            print(f"[mDNS 감시 오류, 계속] {e}")
+
+
 def register_mdns(port=PORT):
     try:
-        from zeroconf import ServiceInfo, Zeroconf
-        import socket
-        # gethostbyname(gethostname())은 macOS에서 127.0.0.1을 주는 경우가 많아
-        # 폰이 switcher.local→자기 자신으로 접속하게 됨. UDP 소켓 트릭으로
-        # 실제 LAN 인터페이스 IP를 얻는다(패킷은 실제로 안 나감).
-        try:
-            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            _s.connect(("8.8.8.8", 80))
-            local_ip = _s.getsockname()[0]
-            _s.close()
-        except OSError:
-            local_ip = socket.gethostbyname(socket.gethostname())
+        from zeroconf import Zeroconf
+        local_ip = _get_lan_ip()
         if local_ip.startswith("127."):
             raise RuntimeError(f"LAN IP를 못 찾음(감지값 {local_ip}) — mDNS 등록 건너뜀")
-        info = ServiceInfo(
-            "_http._tcp.local.",
-            "switcher._http._tcp.local.",
-            addresses=[socket.inet_aton(local_ip)],
-            port=port,
-            properties={"path": "/"},
-            server="switcher.local.",
-        )
         zc = Zeroconf()
-        zc.register_service(info)
-        print(f"🌐 mDNS 등록 완료: http://switcher.local:{port}")
+        zc.register_service(_mdns_info(local_ip, port))
+        print(f"🌐 mDNS 등록 완료: http://switcher.local:{port} ({local_ip})")
+        # IP 변경 자동 감시 → switcher.local 스스로 따라감 (수동 재시작 불필요)
+        threading.Thread(target=_mdns_watch, args=(zc, port, local_ip), daemon=True).start()
         return zc
     except Exception as e:
         print(f"[mDNS 등록 실패, 무시됨] {e}")
@@ -272,7 +298,7 @@ HTML = r"""<!DOCTYPE html>
   html,body{ background:var(--bg); }
   body{ font-family:'Pretendard',-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo',system-ui,sans-serif;
     color:var(--fg); min-height:100dvh; max-width:460px; margin:0 auto; letter-spacing:-.01em;
-    padding:calc(env(safe-area-inset-top) + 24px) 20px calc(env(safe-area-inset-bottom) + 122px);
+    padding:calc(env(safe-area-inset-top) + 24px) 20px calc(env(safe-area-inset-bottom) + 24px);
     position:relative; overflow-x:hidden; }
   .ic{ width:1em; height:1em; display:inline-block; vertical-align:-.14em; fill:currentColor; flex:0 0 auto; }
 
@@ -417,10 +443,9 @@ HTML = r"""<!DOCTYPE html>
     transition:all var(--dur-micro) var(--ease); }
   .type.on{ background:var(--fg); border-color:var(--fg); color:var(--bg); }
 
-  /* ── 하단 고정: 엄지존의 켜기/끄기 ── */
-  .dock{ position:fixed; left:0; right:0; bottom:0; padding:14px 20px calc(14px + env(safe-area-inset-bottom));
-    background:linear-gradient(transparent, var(--bg) 34%); z-index:5; }
-  .dock-in{ max-width:460px; margin:0 auto; display:flex; gap:10px; }
+  /* ── 켜기/끄기 (상단, 상태 히어로 바로 아래) ── */
+  .dock{ margin:2px 0 22px; }
+  .dock-in{ display:flex; gap:10px; }
   .big{ flex:1; height:72px; border-radius:var(--radius); border:var(--bw) solid var(--border);
     font-size:18px; font-weight:800; cursor:pointer; font-family:inherit;
     display:flex; align-items:center; justify-content:center; gap:9px;
@@ -440,7 +465,7 @@ HTML = r"""<!DOCTYPE html>
     display:inline-block; animation:sp .7s linear infinite; }
   @keyframes sp{ to{ transform:rotate(360deg); } }
 
-  #toast{ position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 106px); transform:translateX(-50%) translateY(18px);
+  #toast{ position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 28px); transform:translateX(-50%) translateY(18px);
     background:#2a262e; color:var(--fg); font-size:13.5px; font-weight:600; padding:12px 20px; border-radius:12px;
     box-shadow:0 16px 40px -14px rgba(0,0,0,.6); opacity:0; pointer-events:none; transition:all var(--dur-move) var(--ease);
     z-index:50; max-width:88vw; text-align:center; }
@@ -483,6 +508,14 @@ HTML = r"""<!DOCTYPE html>
   <div class="word" id="st-lbl">대기</div>
   <div class="sub">방금 보낸 명령 기준이에요</div>
   <button class="batbtn" onclick="checkBattery()"><svg class="ic"><use href="#i-battery"/></svg>배터리 <b id="bat-val">탭해서 확인</b></button>
+</div>
+
+<!-- 켜기/끄기 (맨 위, 엄지 안 뻗어도 되게) -->
+<div class="dock">
+  <div class="dock-in">
+    <button class="big" id="btn-on" onclick="cmd('on')"><svg class="ic"><use href="#i-bulb"/></svg>켜기</button>
+    <button class="big" id="btn-off" onclick="cmd('off')"><svg class="ic"><use href="#i-moon"/></svg>끄기</button>
+  </div>
 </div>
 
 <!-- 예약 목록 -->
@@ -564,13 +597,6 @@ HTML = r"""<!DOCTYPE html>
       <button class="wide danger" style="margin-top:0" onclick="forgetDevice()"><svg class="ic"><use href="#i-trash"/></svg>기기 잊기</button>
     </div>
   </details>
-</div>
-
-<div class="dock">
-  <div class="dock-in">
-    <button class="big" id="btn-on" onclick="cmd('on')"><svg class="ic"><use href="#i-bulb"/></svg>켜기</button>
-    <button class="big" id="btn-off" onclick="cmd('off')"><svg class="ic"><use href="#i-moon"/></svg>끄기</button>
-  </div>
 </div>
 
 <div id="toast"></div>
