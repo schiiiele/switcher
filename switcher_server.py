@@ -242,17 +242,28 @@ def _mdns_info(local_ip, port):
 
 def _mdns_watch(zc, port, current_ip, interval=20):
     """Wi-Fi 재접속·DHCP 갱신 등으로 맥 IP가 바뀌면 switcher.local을 새 IP로 재등록.
-    (예전엔 IP 바뀔 때마다 폰에서 접속이 끊겨 수동 재시작해야 했음)"""
+    (예전엔 IP 바뀔 때마다 폰에서 접속이 끊겨 수동 재시작해야 했음)
+
+    update_service()만 쓰면 안 됨: 레코드 속 IP는 바뀌지만 zeroconf가 잡아둔
+    송신 소켓은 옛 IP에 묶인 채라, 폰이 "switcher.local 누구?"라고 물어도 응답이
+    LAN으로 못 나간다(맥 자기 자신만 캐시로 열림). 그래서 Zeroconf를 통째로
+    닫고 새로 만들어 소켓까지 새 IP로 다시 묶는다."""
+    from zeroconf import Zeroconf
     while True:
         time.sleep(interval)
         try:
             ip = _get_lan_ip()
             if ip and not ip.startswith("127.") and ip != current_ip:
-                zc.update_service(_mdns_info(ip, port))
-                print(f"🔄 IP 변경 감지 {current_ip} → {ip} · switcher.local 재등록")
+                try:
+                    zc.close()
+                except Exception:
+                    pass
+                zc = Zeroconf()
+                zc.register_service(_mdns_info(ip, port))
+                print(f"🔄 IP 변경 감지 {current_ip} → {ip} · switcher.local 재등록", flush=True)
                 current_ip = ip
         except Exception as e:
-            print(f"[mDNS 감시 오류, 계속] {e}")
+            print(f"[mDNS 감시 오류, 계속] {e}", flush=True)
 
 
 def register_mdns(port=PORT):
@@ -263,7 +274,7 @@ def register_mdns(port=PORT):
             raise RuntimeError(f"LAN IP를 못 찾음(감지값 {local_ip}) — mDNS 등록 건너뜀")
         zc = Zeroconf()
         zc.register_service(_mdns_info(local_ip, port))
-        print(f"🌐 mDNS 등록 완료: http://switcher.local:{port} ({local_ip})")
+        print(f"🌐 mDNS 등록 완료: http://switcher.local:{port} ({local_ip})", flush=True)
         # IP 변경 자동 감시 → switcher.local 스스로 따라감 (수동 재시작 불필요)
         threading.Thread(target=_mdns_watch, args=(zc, port, local_ip), daemon=True).start()
         return zc
