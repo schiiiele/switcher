@@ -1,5 +1,7 @@
 config.json
 schedules.json
+battery_state.json
+hub_push.json
 *.log
 *.bak-*
 __pycache__/
