@@ -1264,11 +1264,89 @@ def apple_touch_icon():
     return Response(_APPLE_ICON_180, mimetype="image/png")
 
 
+# ── 명령 우체통 (허브 서버 경유) ───────────────────
+# 푸시(hub_push)의 반대 방향이다. 볼트 서버에서 도는 헤르메스가 조명을 끄고 싶어도
+# 이 맥으로는 직접 못 닿는다 — 맥은 공유기 뒤에 있고, 닿게 하려면 외부 문을 열어야
+# 하는데 집 안 기기에 그건 하면 안 된다.
+# 그래서 방향을 뒤집는다. 헤르메스는 허브 우체통에 넣기만 하고, 여기서 주기적으로
+# 가지러 간다. 나가는 통신만 하므로 문을 하나도 열지 않는다.
+CMDBOX_INTERVAL = 10        # 초. 조명은 "말하고 몇 초 뒤"면 충분히 즉각적이다
+CMDBOX_NAME = "switcher"    # 우체통에서 내 앞으로 온 것만 골라내는 이름
+
+
+def _cmdbox_urls():
+    """hub_push.json 의 푸시 주소에서 우체통 주소를 만든다 — 설정을 두 벌 두지 않으려고."""
+    cfg = load_hub_push()
+    if not cfg.get("url") or not cfg.get("token"):
+        return None, None, None
+    base = cfg["url"].replace("/api/push/notify", "/api/mailbox")
+    return base, base + "/%s/done", cfg["token"]
+
+
+def _cmdbox_call(url, token, payload=None):
+    import urllib.request
+    req = urllib.request.Request(
+        url, method="POST" if payload is not None else "GET",
+        data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+        headers={"Content-Type": "application/json", "X-Hub-Token": token})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def cmdbox_run(cmd, args):
+    """우체통 명령을 실제 동작으로 옮긴다. 여기 없는 명령은 거부한다 —
+    바깥에서 온 문자열이 그대로 실행되면 안 되므로 목록에 있는 것만 처리한다."""
+    if cmd == "switch":
+        action = str(args.get("action", "")).lower()
+        if action not in ("on", "off"):
+            return False, "action은 on/off만 가능"
+        run_command(action)
+        return True, "조명 %s" % ("켬" if action == "on" else "끔")
+    if cmd == "battery":
+        level = get_battery_level()
+        record_battery(level)
+        return True, "배터리 %s%%" % level
+    if cmd == "schedules":
+        return True, json.dumps(load_schedules() or [], ensure_ascii=False)[:500]
+    return False, "모르는 명령: %s" % cmd
+
+
+def cmdbox_loop():
+    box, done_tpl, token = _cmdbox_urls()
+    if not box:
+        print("[우체통] hub_push.json 없음 — 원격 명령 안 받음", flush=True)
+        return
+    print(f"[우체통] {CMDBOX_INTERVAL}초마다 확인", flush=True)
+    quiet_fail = 0
+    while True:
+        try:
+            items = _cmdbox_call(f"{box}?to={CMDBOX_NAME}", token).get("items", [])
+            quiet_fail = 0
+            for m in items:
+                try:
+                    ok, result = cmdbox_run(m.get("cmd", ""), m.get("args") or {})
+                except Exception as e:
+                    ok, result = False, str(e)
+                print(f"[우체통] {m.get('cmd')} → {result}", flush=True)
+                try:
+                    _cmdbox_call(done_tpl % m["id"], token, {"ok": ok, "result": result})
+                except Exception as e:
+                    print(f"[우체통] 결과 보고 실패: {e}", flush=True)
+        except Exception as e:
+            # 인터넷이 끊기거나 허브가 배포 중이면 실패한다. 10초마다 같은 줄을
+            # 찍으면 로그가 못 쓰게 되니 처음 한 번과 가끔만 남긴다.
+            quiet_fail += 1
+            if quiet_fail == 1 or quiet_fail % 60 == 0:
+                print(f"[우체통] 확인 실패({quiet_fail}회): {e}", flush=True)
+        time.sleep(CMDBOX_INTERVAL)
+
+
 if __name__ == "__main__":
     import socket
     load_schedules()
     threading.Thread(target=scheduler_loop, daemon=True).start()
     threading.Thread(target=battery_watch_loop, daemon=True).start()
+    threading.Thread(target=cmdbox_loop, daemon=True).start()
     register_mdns(PORT)
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
